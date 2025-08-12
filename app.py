@@ -33,21 +33,25 @@ HTML = """
 </html>
 """
 
-class StreamingOutput:
-    """Collects complete MJPEG frames from Picamera2 encoder and exposes the latest one."""
+class StreamingOutput(io.BufferedIOBase):
+    """A minimal BufferedIOBase sink for Picamera2's MJPEG encoder."""
     def __init__(self):
+        super().__init__()
         self._condition = threading.Condition()
         self._frame = None
 
-    def write(self, buf: bytes):
-        # Called by FileOutput for each encoded JPEG frame
-        with self._condition:
-            self._frame = bytes(buf)
-            self._condition.notify_all()
+    # FileOutput checks for BufferedIOBase; implement the minimal API.
+    def writable(self):
+        return True
 
-    def flush(self):
-        # File-like compatibility (not used)
-        pass
+    def write(self, b: bytes):
+        # Called by FileOutput for each encoded JPEG frame
+        if not isinstance(b, (bytes, bytearray, memoryview)):
+            raise TypeError("expected bytes-like object")
+        with self._condition:
+            self._frame = bytes(b)
+            self._condition.notify_all()
+        return len(b)
 
     def get_frame(self):
         with self._condition:
@@ -59,25 +63,24 @@ app = Flask(__name__)
 # ---- Camera setup ----
 picam2 = Picamera2()
 
-# Choose a sensible default; adjust for performance if needed.
-# RPi 4 can do 1280x720@30 easily; on RPi 3 you may prefer 640x480@30.
-VIDEO_SIZE = (1280, 720)  # change to (640, 480) if the 3 struggles
+# Adjust for your Pi: RPi 4 is fine at 1280x720@30; RPi 3 may prefer 640x480@30.
+VIDEO_SIZE = (1280, 720)
 FRAMERATE = 30
 
 config = picam2.create_video_configuration(
-    main={"size": VIDEO_SIZE, "format": "RGB888"},
+    main={"size": VIDEO_SIZE},  # let Picamera2 pick an encoder-friendly format
     controls={"FrameRate": FRAMERATE}
 )
 picam2.configure(config)
 
-# Optional: try continuous autofocus if supported (e.g., HQ/IMX477 with AF module or IMX708/AF)
+# Optional: continuous AF (silently ignored if unsupported)
 try:
     picam2.set_controls({"AfMode": 2})  # 2 = Continuous
 except Exception:
     pass
 
-output = StreamingOutput()
-encoder = MJPEGEncoder()  # hardware-accelerated MJPEG on Pi
+output_sink = StreamingOutput()
+encoder = MJPEGEncoder()
 
 @app.route("/")
 def index():
@@ -88,7 +91,7 @@ def stream():
     def gen():
         boundary = b"--frame"
         while True:
-            frame = output.get_frame()
+            frame = output_sink.get_frame()
             yield (boundary + b"\r\n"
                    b"Content-Type: image/jpeg\r\n"
                    b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" +
@@ -96,9 +99,9 @@ def stream():
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 def start_camera():
-    # Start the camera and MJPEG recording into our in-memory output
     picam2.start()
-    picam2.start_recording(encoder, FileOutput(output))
+    # IMPORTANT: wrap our BufferedIOBase in FileOutput
+    picam2.start_recording(encoder, FileOutput(output_sink))
 
 def stop_camera(*_):
     try:
@@ -116,6 +119,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, stop_camera)
 
     start_camera()
-    # Use threaded server so streaming generator doesn’t block
     app.run(host="0.0.0.0", port=8000, threaded=True)
     stop_camera()
