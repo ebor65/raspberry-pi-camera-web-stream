@@ -2,6 +2,7 @@
 import io
 import signal
 import threading
+import time
 from flask import Flask, Response, render_template_string
 
 from picamera2 import Picamera2
@@ -34,53 +35,59 @@ HTML = """
 """
 
 class StreamingOutput(io.BufferedIOBase):
-    """A minimal BufferedIOBase sink for Picamera2's MJPEG encoder."""
+    """Buffered sink for Picamera2 MJPEG frames with a 'wait-for-new' iterator."""
     def __init__(self):
         super().__init__()
-        self._condition = threading.Condition()
+        self._cond = threading.Condition()
         self._frame = None
+        self._seq = 0
 
-    # FileOutput checks for BufferedIOBase; implement the minimal API.
     def writable(self):
         return True
 
     def write(self, b: bytes):
-        # Called by FileOutput for each encoded JPEG frame
         if not isinstance(b, (bytes, bytearray, memoryview)):
             raise TypeError("expected bytes-like object")
-        with self._condition:
+        with self._cond:
             self._frame = bytes(b)
-            self._condition.notify_all()
+            self._seq += 1
+            self._cond.notify_all()
         return len(b)
 
-    def get_frame(self):
-        with self._condition:
-            self._condition.wait_for(lambda: self._frame is not None)
-            return self._frame
+    def frames(self):
+        """Yield each new frame exactly once."""
+        last = -1
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self._seq != last)
+                last = self._seq
+                frame = self._frame
+            yield frame
 
 app = Flask(__name__)
 
 # ---- Camera setup ----
 picam2 = Picamera2()
 
-# Adjust for your Pi: RPi 4 is fine at 1280x720@30; RPi 3 may prefer 640x480@30.
-VIDEO_SIZE = (1280, 720)
-FRAMERATE = 30
+# Tune for your board; Pi 3 prefers smaller frames. Start conservative if unstable.
+VIDEO_SIZE = (1280, 720)  # try (960, 540) or (640, 480) on Pi 3
+FRAMERATE = 25            # 25 is gentler than 30 on Pi 3
+JPEG_QUALITY = 80         # lower = smaller bandwidth
 
 config = picam2.create_video_configuration(
-    main={"size": VIDEO_SIZE},  # let Picamera2 pick an encoder-friendly format
+    main={"size": VIDEO_SIZE},
     controls={"FrameRate": FRAMERATE}
 )
 picam2.configure(config)
 
-# Optional: continuous AF (silently ignored if unsupported)
+# Optional autofocus (ignored if not supported)
 try:
-    picam2.set_controls({"AfMode": 2})  # 2 = Continuous
+    picam2.set_controls({"AfMode": 2})  # continuous AF
 except Exception:
     pass
 
-output_sink = StreamingOutput()
-encoder = MJPEGEncoder()
+output = StreamingOutput()
+encoder = MJPEGEncoder()  # hardware MJPEG
 
 @app.route("/")
 def index():
@@ -88,10 +95,10 @@ def index():
 
 @app.route("/stream.mjpg")
 def stream():
+    boundary = b"--frame"
     def gen():
-        boundary = b"--frame"
-        while True:
-            frame = output_sink.get_frame()
+        # Stream only when a NEW frame arrives; don't spam duplicates.
+        for frame in output.frames():
             yield (boundary + b"\r\n"
                    b"Content-Type: image/jpeg\r\n"
                    b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" +
@@ -99,19 +106,15 @@ def stream():
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 def start_camera():
-    picam2.start()
-    # IMPORTANT: wrap our BufferedIOBase in FileOutput
-    picam2.start_recording(encoder, FileOutput(output_sink))
+    # start_recording starts the camera; a separate picam2.start() is not needed.
+    picam2.start_recording(encoder, FileOutput(output), quality=JPEG_QUALITY)
 
 def stop_camera(*_):
-    try:
-        picam2.stop_recording()
-    except Exception:
-        pass
-    try:
-        picam2.stop()
-    except Exception:
-        pass
+    for fn in (picam2.stop_recording, picam2.stop):
+        try:
+            fn()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     # Clean shutdown on Ctrl+C or SIGTERM (systemd)
@@ -119,5 +122,6 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, stop_camera)
 
     start_camera()
-    app.run(host="0.0.0.0", port=8000, threaded=True)
+    # Disable the Flask reloader to avoid double-starts of the camera.
+    app.run(host="0.0.0.0", port=8000, threaded=True, debug=False, use_reloader=False)
     stop_camera()
