@@ -16,7 +16,7 @@ sudo raspi-config   # Interface Options → Camera → Enable, then reboot
 
 # pick a location you like
 cd ~
-git clone https://github.com/<your-user>/raspberry-pi-camera-web-stream.git
+git clone https://github.com/ebor65/raspberry-pi-camera-web-stream.git
 cd raspberry-pi-camera-web-stream
 
 # (optional) install Python deps via pip instead of apt for Flask
