@@ -29,3 +29,15 @@ sudo cp systemd/raspberry-cam.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now raspberry-cam.service
 
+stop service and disable
+sudo systemctl stop raspberry-cam.service
+sudo systemctl disable raspberry-cam.service
+
+statis wlan ip
+sudo nano /etc/dhcpcd.conf
+add at the end
+interface wlan0
+static ip_address=192.168.0.33/24
+static routers=192.168.0.1
+static domain_name_servers=192.168.0.1 8.8.8.8
+
