@@ -41,3 +41,14 @@ static ip_address=192.168.0.33/24
 static routers=192.168.0.1
 static domain_name_servers=192.168.0.1 8.8.8.8
 
+fix GUI blank screen
+sudo nano /boot/config.txt
+uncomment/add
+hdmi_force_hotplug=1
+hdmi_group=2
+hdmi_mode=82
+hdmi_enable_4kp60=0
+
+
+
+fi
